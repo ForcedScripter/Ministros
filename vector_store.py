@@ -108,10 +108,12 @@ def insert_document(text: str, metadata: dict, domain: str):
 
 RETRIEVAL_CACHE_FILE = "retrieval_cache.json"
 
-if os.path.exists(RETRIEVAL_CACHE_FILE):
-    with open(RETRIEVAL_CACHE_FILE, "r") as f:
-        retrieval_cache = json.load(f)
-else:
+retrieval_cache = {}
+try:
+    if os.path.exists(RETRIEVAL_CACHE_FILE):
+        with open(RETRIEVAL_CACHE_FILE, "r") as f:
+            retrieval_cache = json.load(f)
+except Exception:
     retrieval_cache = {}
 
 
@@ -121,8 +123,11 @@ def _cache_key(query: str, domain: str):
 
 
 def _save_cache():
-    with open(RETRIEVAL_CACHE_FILE, "w") as f:
-        json.dump(retrieval_cache, f)
+    try:
+        with open(RETRIEVAL_CACHE_FILE, "w") as f:
+            json.dump(retrieval_cache, f)
+    except Exception:
+        pass  # Ephemeral filesystem — cache write may fail on Render
 
 
 # ==============================

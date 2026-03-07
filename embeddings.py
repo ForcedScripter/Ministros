@@ -8,11 +8,13 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 CACHE_FILE = "embedding_cache.json"
 
-# Load cache if exists
-if os.path.exists(CACHE_FILE):
-    with open(CACHE_FILE, "r") as f:
-        embedding_cache = json.load(f)
-else:
+# Load cache if exists (safe for ephemeral filesystems)
+embedding_cache = {}
+try:
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r") as f:
+            embedding_cache = json.load(f)
+except Exception:
     embedding_cache = {}
 
 
@@ -36,7 +38,10 @@ def embed_text(text: str):
     # 3️⃣ Store in cache
     embedding_cache[key] = embedding
 
-    with open(CACHE_FILE, "w") as f:
-        json.dump(embedding_cache, f)
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(embedding_cache, f)
+    except Exception:
+        pass  # Ephemeral filesystem — cache write may fail on Render
 
     return embedding

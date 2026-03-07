@@ -13,6 +13,7 @@ env/
 
 # Environment variables
 .env
+render_env_vars.txt
 
 # OS files
 .DS_Store
@@ -36,5 +37,14 @@ huggingface/
 # Jupyter
 .ipynb_checkpoints/
 
+# Cache files (rebuilt on first use)
+embedding_cache.json
+retrieval_cache.json
+
+# Audio outputs
+audio_outputs/
+
+# User storage fallback
+users.json
+
 # API configs
-config.py

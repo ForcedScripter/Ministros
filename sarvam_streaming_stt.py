@@ -1,5 +1,3 @@
-import sounddevice as sd
-import soundfile as sf
 import requests
 import tempfile
 import os
@@ -44,11 +42,17 @@ def transcribe_chunk(audio_path):
 
 
 # ==================================
-# STREAM LOOP
+# STREAM LOOP (local CLI only — requires sounddevice + PortAudio)
 # ==================================
 
 
 def stream_audio_to_sarvam(callback):
+    # Lazy imports — these require PortAudio system library which
+    # is NOT available on Render / cloud servers.  Only used for
+    # local microphone streaming, never by the FastAPI server.
+    import sounddevice as sd
+    import soundfile as sf
+
     print("\n🎤 Speak continuously (Ctrl+C to stop)\n")
 
     try:

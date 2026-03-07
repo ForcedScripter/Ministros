@@ -9,13 +9,6 @@ openai>=1.30.0
 qdrant-client>=1.9.0
 
 # ===============================
-# RAG + RERANKING
-# ===============================
-sentence-transformers>=2.7.0
-transformers>=4.41.0
-torch>=2.2.0
-
-# ===============================
 # GRAPH LAYER
 # ===============================
 networkx>=3.2
@@ -25,12 +18,11 @@ networkx>=3.2
 # ===============================
 fastapi>=0.111.0
 uvicorn>=0.30.0
+gunicorn>=21.2.0
 
 # ===============================
-# SPEECH TO TEXT (SARVAM)
+# HTTP + STT (SARVAM API calls)
 # ===============================
-sounddevice>=0.5.0
-soundfile>=0.12.1
 numpy>=1.26.0
 requests>=2.32.0
 
