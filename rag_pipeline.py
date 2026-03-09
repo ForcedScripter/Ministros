@@ -6,7 +6,7 @@ from web_search import search_web
 
 
 # Good threshold for OpenAI embeddings
-SIMILARITY_THRESHOLD = 0.35
+SIMILARITY_THRESHOLD = 0.15
 
 
 def run_rag(user_id, query, customer_type: str | None = None, session_collection: str | None = None):
