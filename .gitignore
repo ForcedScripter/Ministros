@@ -47,4 +47,7 @@ audio_outputs/
 # User storage fallback
 users.json
 
+# Large data files
+*.pdf
+
 # API configs
