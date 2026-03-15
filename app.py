@@ -4,6 +4,9 @@
 # with frontend bridge (voice-chat, upload, auth, session mgmt)
 # ==========================================================
 
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file for local development
+
 import tempfile
 import os
 import base64
@@ -100,7 +103,11 @@ class UserLogin(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "collections": list_collections()}
+    try:
+        collections = list_collections()
+        return {"status": "ok", "qdrant_status": "connected", "collections": collections}
+    except Exception as e:
+        return {"status": "ok", "qdrant_status": f"error: {str(e)}", "collections": []}
 
 
 # ==========================================================
