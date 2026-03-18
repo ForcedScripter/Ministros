@@ -7,35 +7,52 @@
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file for local development
 
-import tempfile
-import os
+import asyncio
 import base64
-import uuid
 import io
+import os
+import tempfile
+import time
+import uuid
+from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import pdfplumber
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+)
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import pdfplumber
 
+from auth import decode_token, login_user, signup_user
+from collections_api import router as collections_router
+from config import COLLECTIONS, resolve_collection_name
 from rag_pipeline import run_rag
 from sarvam_streaming_stt import transcribe_chunk
-from tts import speak, set_voice
+from tts import set_voice, speak
 from vector_store import (
-    insert_document,
     create_collection,
+    insert_document,
     list_collections,
 )
-from config import COLLECTIONS, resolve_collection_name
-from collections_api import router as collections_router
-from auth import signup_user, login_user
 
 app = FastAPI(title="Customer Service AI")
 app.include_router(collections_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # Frontend origins – adjust via FRONTEND_ORIGINS env if needed
+    allow_origins=os.getenv(
+        "FRONTEND_ORIGINS",
+        "https://natural-vocl-ai.vercel.app,http://localhost:3000",
+    ).split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -50,6 +67,62 @@ user_voices = {}          # user_id -> voice name (e.g. "Kavya", "Aditya")
 
 # Pre-trained collections available in Qdrant (mirrors config.COLLECTIONS)
 PRETRAINED_COLLECTIONS = COLLECTIONS  # {"ecommerce": "ecommerce", "car_booking": "car_booking"}
+
+
+# ==========================================================
+# AUTH + RATE LIMITING HELPERS
+# ==========================================================
+
+
+API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", "60"))  # requests
+API_RATE_WINDOW = int(os.getenv("API_RATE_WINDOW", "60"))  # seconds
+_rate_hits: dict[str, list[float]] = {}
+
+
+def _get_identifier(request: Request, username: Optional[str]) -> str:
+    if username:
+        return f"user:{username}"
+    client_ip = request.client.host if request.client else "unknown"
+    return f"ip:{client_ip}"
+
+
+async def rate_limiter(
+    request: Request,
+    current_user: Optional[str] = Depends(lambda: None),
+):
+    """
+    Simple in-process sliding-window rate limiter.
+    Uses username when authenticated, otherwise IP.
+    """
+    key = _get_identifier(request, current_user)
+    now = time.time()
+    window_start = now - API_RATE_WINDOW
+
+    hits = _rate_hits.get(key, [])
+    hits = [t for t in hits if t >= window_start]
+
+    if len(hits) >= API_RATE_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests. Please slow down.",
+        )
+
+    hits.append(now)
+    _rate_hits[key] = hits
+
+
+def optional_current_user(authorization: str = Header(default="", alias="Authorization")) -> Optional[str]:
+    """
+    Decode JWT token if present, otherwise return None.
+    Does not raise, so it can be used in public endpoints and rate limiting.
+    """
+    if not authorization.startswith("Bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    payload = decode_token(token)
+    if not payload or "sub" not in payload:
+        return None
+    return str(payload["sub"])
 
 
 def get_session_collection(user_id: str) -> str | None:
@@ -102,9 +175,9 @@ class UserLogin(BaseModel):
 
 
 @app.get("/health")
-def health():
+async def health():
     try:
-        collections = list_collections()
+        collections = await run_in_threadpool(list_collections)
         return {"status": "ok", "qdrant_status": "connected", "collections": collections}
     except Exception as e:
         return {"status": "ok", "qdrant_status": f"error: {str(e)}", "collections": []}
@@ -116,14 +189,24 @@ def health():
 
 
 @app.post("/chat")
-def chat(req: ChatRequest):
-    uid = req.user_id or str(uuid.uuid4())
+async def chat(
+    req: ChatRequest,
+    current_user: Optional[str] = Depends(optional_current_user),
+    _: None = Depends(rate_limiter),
+):
+    uid = req.user_id or current_user or str(uuid.uuid4())
 
     # domain: explicit customer_type > user's pretrained selection > default
     domain = req.customer_type or user_pretrained.get(uid)
     session_col = get_session_collection(uid)
 
-    response = run_rag(uid, req.query, customer_type=domain, session_collection=session_col)
+    response = await run_in_threadpool(
+        run_rag,
+        uid,
+        req.query,
+        customer_type=domain,
+        session_collection=session_col,
+    )
     return {"response": response, "user_id": uid}
 
 
@@ -138,8 +221,10 @@ async def voice_chat(
     audio: UploadFile = File(...),
     user_id: str = Form(default=""),
     voice: str = Form(default=""),          # sent with every request from frontend
+    current_user: Optional[str] = Depends(optional_current_user),
+    _: None = Depends(rate_limiter),
 ):
-    uid = user_id or str(uuid.uuid4())
+    uid = user_id or current_user or str(uuid.uuid4())
 
     suffix = ".webm" if (audio.filename and audio.filename.endswith(".webm")) else ".wav"
 
@@ -150,7 +235,7 @@ async def voice_chat(
 
     transcript = ""
     try:
-        transcript = transcribe_chunk(temp_path)
+        transcript = await run_in_threadpool(transcribe_chunk, temp_path)
     except Exception as e:
         print(f"STT Error: {e}")
     finally:
@@ -164,7 +249,13 @@ async def voice_chat(
     domain = user_pretrained.get(uid)
     session_col = get_session_collection(uid)
 
-    response = run_rag(uid, transcript, customer_type=domain, session_collection=session_col)
+    response = await run_in_threadpool(
+        run_rag,
+        uid,
+        transcript,
+        customer_type=domain,
+        session_collection=session_col,
+    )
 
     # Voice: FormData field (sent every request) > user_voices dict > global default
     use_voice = voice or user_voices.get(uid) or None
@@ -176,7 +267,7 @@ async def voice_chat(
 
     audio_base64 = None
     try:
-        audio_path = speak(response)
+        audio_path = await run_in_threadpool(speak, response)
         if audio_path and os.path.exists(audio_path):
             with open(audio_path, "rb") as af:
                 audio_base64 = base64.b64encode(af.read()).decode("utf-8")
@@ -201,8 +292,10 @@ async def voice_chat(
 async def upload(
     file: UploadFile = File(...),
     user_id: str = Form(default=""),
+    current_user: Optional[str] = Depends(optional_current_user),
+    _: None = Depends(rate_limiter),
 ):
-    uid = user_id or str(uuid.uuid4())
+    uid = user_id or current_user or str(uuid.uuid4())
     session_collection = ensure_session_collection(uid)
 
     content = await file.read()
@@ -223,10 +316,11 @@ async def upload(
     if not text:
         raise HTTPException(status_code=400, detail="No text extracted from file")
 
-    insert_document(
-        text=text,
-        metadata={"source_file": filename, "user_id": uid},
-        domain=session_collection,
+    await run_in_threadpool(
+        insert_document,
+        text,
+        {"source_file": filename, "user_id": uid},
+        session_collection,
     )
 
     return {
@@ -243,7 +337,18 @@ async def upload(
 
 
 @app.post("/end-session")
-def end_session(user_id: str = Form(default="")):
+async def end_session(
+    user_id: str = Form(default=""),
+    current_user: Optional[str] = Depends(optional_current_user),
+    _: None = Depends(rate_limiter),
+):
+    uid = user_id or current_user
+    if uid and uid in active_sessions:
+        col_name = active_sessions[uid]
+        # Note: we don't delete Qdrant collection here to preserve perf,
+        # just drop the reference. Session data expires naturally.
+        del active_sessions[uid]
+        return {"status": "session_ended", "collection": col_name}
     if user_id and user_id in active_sessions:
         col_name = active_sessions[user_id]
         # Note: we don't delete Qdrant collection here to preserve perf,
@@ -259,12 +364,18 @@ def end_session(user_id: str = Form(default="")):
 
 
 @app.post("/set-voice")
-def set_voice_endpoint(req: VoiceOption):
+async def set_voice_endpoint(
+    req: VoiceOption,
+    current_user: Optional[str] = Depends(optional_current_user),
+    _: None = Depends(rate_limiter),
+):
+    # Prefer per-user voice when logged in
+    user_key = req.user_id or current_user or ""
     set_voice(req.voice)
-    if req.user_id:
-        user_voices[req.user_id] = req.voice
-    print(f"✅ set-voice: user={req.user_id or 'global'}, voice={req.voice}")
-    return {"status": "ok", "voice": req.voice}
+    if user_key:
+        user_voices[user_key] = req.voice
+    print(f"✅ set-voice: user={user_key or 'global'}, voice={req.voice}")
+    return {"status": "ok", "voice": req.voice, "user_id": user_key or None}
 
 
 # ==========================================================
@@ -273,10 +384,14 @@ def set_voice_endpoint(req: VoiceOption):
 
 
 @app.post("/set-collection")
-def set_collection_endpoint(req: CollectionOption):
+async def set_collection_endpoint(
+    req: CollectionOption,
+    current_user: Optional[str] = Depends(optional_current_user),
+    _: None = Depends(rate_limiter),
+):
     if req.collection not in PRETRAINED_COLLECTIONS:
         raise HTTPException(status_code=400, detail=f"Unknown collection: {req.collection}")
-    uid = req.user_id or "anon"
+    uid = req.user_id or current_user or "anon"
     user_pretrained[uid] = req.collection
     print(f"✅ set-collection: user={uid}, domain={req.collection}")
     return {"status": "ok", "collection": req.collection, "user_id": uid}
@@ -288,16 +403,16 @@ def set_collection_endpoint(req: CollectionOption):
 
 
 @app.post("/signup")
-def signup(user: UserCreate):
-    ok, msg = signup_user(user.username, user.password)
+async def signup(user: UserCreate, _: None = Depends(rate_limiter)):
+    ok, msg = await run_in_threadpool(signup_user, user.username, user.password)
     if not ok:
         raise HTTPException(status_code=409, detail=msg)
     return {"message": msg}
 
 
 @app.post("/login")
-def login(user: UserLogin):
-    ok, result = login_user(user.username, user.password)
+async def login(user: UserLogin, _: None = Depends(rate_limiter)):
+    ok, result = await run_in_threadpool(login_user, user.username, user.password)
     if not ok:
         raise HTTPException(status_code=401, detail=result)
     return {"access_token": result}
